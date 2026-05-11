@@ -1,0 +1,11 @@
+{
+  "name": "MentorPulse",
+  "description": "A comprehensive mentorship management platform with student tracking, automated reminders, AI-driven progress reports, and Excel export capabilities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "Firebase Authentication",
+    "Firestore Database",
+    "AI Insights",
+    "Excel Export"
+  ]
+}

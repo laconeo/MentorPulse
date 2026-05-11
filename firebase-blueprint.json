@@ -1,0 +1,76 @@
+{
+  "entities": {
+    "Profile": {
+      "title": "User Profile",
+      "description": "Stores user roles and settings",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["mentor", "admin"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role"]
+    },
+    "Student": {
+      "title": "Student",
+      "description": "Individual student record",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "studentNumber": { "type": "string" },
+        "courseHistory": { "type": "string" },
+        "mentorId": { "type": "string" },
+        "status": { "type": "string" },
+        "lastContactDate": { "type": "string", "format": "date-time" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "mentorId"]
+    },
+    "Interaction": {
+      "title": "Interaction",
+      "description": "Weekly follow-up record",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string" },
+        "mentorId": { "type": "string" },
+        "week": { "type": "integer" },
+        "date": { "type": "string", "format": "date-time" },
+        "responseType": { "type": "string", "enum": ["High Impact", "Moderately Significant", "Brief Interaction", "No Response"] },
+        "content": { "type": "string" },
+        "summary": { "type": "string" }
+      },
+      "required": ["studentId", "mentorId", "week", "date"]
+    },
+    "Template": {
+      "title": "Message Template",
+      "description": "Reusable outreach messages",
+      "type": "object",
+      "properties": {
+        "mentorId": { "type": "string" },
+        "title": { "type": "string" },
+        "content": { "type": "string" }
+      },
+      "required": ["mentorId", "title", "content"]
+    }
+  },
+  "firestore": {
+    "profiles/{userId}": {
+      "schema": "Profile",
+      "description": "User profile documents"
+    },
+    "students/{studentId}": {
+      "schema": "Student",
+      "description": "Student documents"
+    },
+    "interactions/{interactionId}": {
+      "schema": "Interaction",
+      "description": "Interaction log documents"
+    },
+    "templates/{templateId}": {
+      "schema": "Template",
+      "description": "Outreach templates"
+    }
+  }
+}

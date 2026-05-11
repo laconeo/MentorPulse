@@ -1,0 +1,119 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 0.1 Helpers
+    function isSignedIn() {
+      // Mandating verified email as per instructions
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(data) {
+      return isSignedIn() && data.mentorId == request.auth.uid;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && 
+        exists(/databases/$(database)/documents/profiles/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/profiles/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 1. Validation Blueprints
+    function isValidStudent(data) {
+      return data.keys().hasAll(['name', 'mentorId', 'status', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+             data.mentorId == request.auth.uid &&
+             data.status in ['Active', 'Inactive'] &&
+             data.createdAt == request.time &&
+             (!data.keys().contains('updatedAt') || data.updatedAt == request.time) &&
+             (!data.keys().contains('studentNumber') || (data.studentNumber is string && data.studentNumber.size() <= 100)) &&
+             (!data.keys().contains('courseHistory') || (data.courseHistory is string && data.courseHistory.size() <= 500)) &&
+             (!data.keys().contains('notes') || (data.notes is string && data.notes.size() <= 2000));
+    }
+
+    function isValidInteraction(data) {
+      return data.keys().hasAll(['studentId', 'mentorId', 'week', 'date']) &&
+             data.studentId is string && isValidId(data.studentId) &&
+             data.mentorId == request.auth.uid &&
+             data.week is int && data.week >= 1 && data.week <= 52 &&
+             data.date == request.time &&
+             (!data.keys().contains('responseType') || data.responseType in ['High Impact', 'Moderately Significant', 'Brief Interaction', 'No Response']) &&
+             (!data.keys().contains('content') || (data.content is string && data.content.size() <= 5000));
+    }
+
+    function isValidTemplate(data) {
+      return data.keys().hasAll(['mentorId', 'title', 'content']) &&
+             data.mentorId == request.auth.uid &&
+             data.title is string && data.title.size() <= 200 &&
+             data.content is string && data.content.size() <= 5000;
+    }
+
+    // 2. Resource Rules
+
+    // PROFILES
+    match /profiles/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow create: if isSignedIn() && request.auth.uid == userId && 
+                    incoming().keys().hasAll(['email', 'role', 'createdAt']) &&
+                    incoming().role == 'mentor' &&
+                    incoming().createdAt == request.time;
+      allow update: if isSignedIn() && (request.auth.uid == userId || isAdmin()) &&
+                    (incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email']) || isAdmin());
+    }
+
+    // STUDENTS
+    match /students/{studentId} {
+      allow get: if isSignedIn() && (isOwner(existing()) || isAdmin()) && isValidId(studentId);
+      allow list: if isSignedIn() && (resource.data.mentorId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isValidStudent(incoming()) && isValidId(studentId);
+      allow update: if (isOwner(existing()) || isAdmin()) && isValidId(studentId) && 
+                    isValidStudent(incoming()) && (
+                      incoming().diff(existing()).affectedKeys().hasOnly(['name', 'studentNumber', 'courseHistory', 'status', 'notes', 'updatedAt', 'lastContactDate']) ||
+                      isAdmin()
+                    );
+      allow delete: if (isOwner(existing()) || isAdmin()) && isValidId(studentId);
+    }
+
+    // INTERACTIONS
+    match /interactions/{interactionId} {
+      allow get: if isSignedIn() && (isOwner(existing()) || isAdmin()) && isValidId(interactionId);
+      allow list: if isSignedIn() && (resource.data.mentorId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isValidInteraction(incoming()) && isValidId(interactionId);
+      allow update: if (isOwner(existing()) || isAdmin()) && isValidId(interactionId) &&
+                    isValidInteraction(incoming()) && (
+                      incoming().diff(existing()).affectedKeys().hasOnly(['responseType', 'content', 'date', 'summary', 'updatedAt']) ||
+                      isAdmin()
+                    );
+      allow delete: if (isOwner(existing()) || isAdmin()) && isValidId(interactionId);
+    }
+
+    // TEMPLATES
+    match /templates/{templateId} {
+      allow get: if isSignedIn() && (isOwner(existing()) || isAdmin()) && isValidId(templateId);
+      allow list: if isSignedIn() && (resource.data.mentorId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isValidTemplate(incoming()) && isValidId(templateId);
+      allow update: if (isOwner(existing()) || isAdmin()) && isValidId(templateId) &&
+                    isValidTemplate(incoming()) && (
+                      incoming().diff(existing()).affectedKeys().hasOnly(['title', 'content', 'updatedAt']) ||
+                      isAdmin()
+                    );
+      allow delete: if (isOwner(existing()) || isAdmin()) && isValidId(templateId);
+    }
+  }
+}
