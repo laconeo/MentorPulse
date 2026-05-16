@@ -27,9 +27,38 @@ import {
   Video as VideoIcon,
   ChevronUp,
   ChevronDown,
-  ChevronsUpDown
+  ChevronsUpDown,
+  Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+
+interface DebouncedTextareaProps extends Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, 'value' | 'onChange'> {
+  onSave: (val: string) => void;
+  initialValue: string;
+}
+
+const DebouncedTextarea: React.FC<DebouncedTextareaProps> = ({ onSave, initialValue, ...props }) => {
+  const [value, setValue] = useState(initialValue);
+
+  useEffect(() => {
+    setValue(initialValue);
+  }, [initialValue]);
+
+  const handleBlur = () => {
+    if (value !== initialValue) {
+      onSave(value);
+    }
+  };
+
+  return (
+    <textarea
+      {...props}
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={handleBlur}
+    />
+  );
+};
 
 export const StudentTracker: React.FC = () => {
   const { profile } = useAuth();
@@ -39,11 +68,23 @@ export const StudentTracker: React.FC = () => {
   const [selectedWeek, setSelectedWeek] = useState(getCurrentWeek());
   const [isAddingStudent, setIsAddingStudent] = useState(false);
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
-  const [newStudent, setNewStudent] = useState({ name: '', studentNumber: '', phone: '', courseHistory: '' });
+  const [newStudent, setNewStudent] = useState({ name: '', studentNumber: '', phone: '', courseHistory: 'Current' });
   const [chatModalOpen, setChatModalOpen] = useState(false);
   const [selectedStudentForChat, setSelectedStudentForChat] = useState<Student | null>(null);
   const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
+  const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const [isProcessingAI, setIsProcessingAI] = useState(false);
+  const [aiProgress, setAiProgress] = useState(0);
+  const [aiStatus, setAiStatus] = useState('');
+  const [importModal, setImportModal] = useState<{
+    open: boolean;
+    fileName: string;
+    columns: string[];
+    rows: any[];
+    mapping: Record<string, string>;
+  }>({ open: false, fileName: '', columns: [], rows: [], mapping: {} });
 
   const loadData = async () => {
     try {
@@ -70,7 +111,7 @@ export const StudentTracker: React.FC = () => {
       mentorId: profile?.id || 'mentor_123',
     });
     window.dispatchEvent(new CustomEvent('supabase-db-update'));
-    setNewStudent({ name: '', studentNumber: '', phone: '', courseHistory: '' });
+    setNewStudent({ name: '', studentNumber: '', phone: '', courseHistory: 'Current' });
     setEditingStudent(null);
     setIsAddingStudent(false);
   };
@@ -96,27 +137,163 @@ export const StudentTracker: React.FC = () => {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Reset so same file can be re-selected
+    e.target.value = '';
 
     const reader = new FileReader();
-    reader.onload = async (evt) => {
+    reader.onload = (evt) => {
       const bstr = evt.target?.result;
       const wb = XLSX.read(bstr, { type: 'binary' });
-      const wsname = wb.SheetNames[0];
-      const ws = wb.Sheets[wsname];
-      const data = XLSX.utils.sheet_to_json(ws) as any[];
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' }) as any[];
+      const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
 
-      for (const row of data) {
-        await db.saveStudent({
-          name: row['Full Name'] || row['Nombre'] || row['name'],
-          studentNumber: String(row['Student Number'] || row['ID'] || row['id'] || ''),
-          courseHistory: row['Student Course History'] || row['Curso'] || '',
-          mentorId: profile?.id || 'mentor_123',
-        });
-      }
-      window.dispatchEvent(new CustomEvent('supabase-db-update'));
-      alert(`¡${data.length} alumnos importados con éxito!`);
+      // Auto-detect common column names
+      const guess = (candidates: string[]) =>
+        columns.find(c => candidates.some(k => c.toLowerCase().includes(k.toLowerCase()))) || '';
+
+      setImportModal({
+        open: true,
+        fileName: file.name,
+        columns,
+        rows,
+        mapping: {
+          name:              guess(['Full Name', 'Fullname', 'Nombre', 'Name', 'Student Name']),
+          studentNumber:     guess(['Student Number', 'ID', 'Number', 'Numero']),
+          phone:             guess(['WhatsApp', 'Phone', 'Telefono', 'Teléfono', 'Mobile']),
+          currentCertificate:guess(['Certificate', 'Certificado', 'Course Name', 'Programa']),
+          courseHistory:     guess(['Course History', 'Status', 'Curso', 'Estado']),
+        },
+      });
     };
     reader.readAsBinaryString(file);
+  };
+
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    if (!apiKey) {
+      alert("Por favor, configura VITE_GEMINI_API_KEY en tu archivo .env con tu clave de Google AI Studio para usar esta función.");
+      return;
+    }
+
+    setIsProcessingAI(true);
+    setAiProgress(0);
+    setAiStatus('Leyendo imagen...');
+
+    // Simulated progress ticker
+    const progressInterval = setInterval(() => {
+      setAiProgress(prev => {
+        if (prev >= 85) { clearInterval(progressInterval); return prev; }
+        return prev + Math.random() * 8;
+      });
+    }, 400);
+
+    try {
+      const base64Image = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const base64Data = base64Image.split(',')[1];
+
+      setAiStatus('Analizando con Gemini AI...');
+      setAiProgress(20);
+
+      const prompt = `Analiza la siguiente imagen que contiene una tabla de alumnos. 
+Extrae la información de cada alumno en formato JSON, devolviendo estrictamente un array de objetos JSON con la siguiente estructura y claves EXACTAS:
+[
+  {
+    "Fullname": "Nombre completo del alumno",
+    "Student Number": "Número de estudiante",
+    "Current Certificate": "Certificado actual o programa",
+    "Student Status": "Estado del alumno (ej. Active)",
+    "Whatsapp": "Número de Whatsapp o teléfono"
+  }
+]
+Si un dato no está en la imagen, déjalo como "". Solo devuelve la salida JSON, sin texto adicional ni marcadores de código como \`\`\`json.`;
+
+      const response = await fetch(
+        `/gemini-api/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: prompt },
+                { inline_data: { mime_type: file.type, data: base64Data } }
+              ]
+            }]
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const errBody = await response.text();
+        throw new Error(`Gemini API error ${response.status}: ${errBody}`);
+      }
+
+      clearInterval(progressInterval);
+      setAiProgress(75);
+      setAiStatus('Extrayendo datos de alumnos...');
+
+      const data = await response.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const cleanText = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+      const studentsData = JSON.parse(cleanText);
+
+      setAiProgress(85);
+      const existingNames = new Set(students.map(s => s.name.toLowerCase().trim()));
+      const existingNumbers = new Set(students.map(s => s.studentNumber?.toLowerCase().trim()).filter(Boolean));
+
+      let savedCount = 0;
+      let skippedCount = 0;
+      for (const row of studentsData) {
+        if (!row['Fullname']) continue;
+        const rowName = row['Fullname'].toLowerCase().trim();
+        const rowNum  = String(row['Student Number'] || '').toLowerCase().trim();
+        // Skip if name or student number already exists
+        if (existingNames.has(rowName) || (rowNum && existingNumbers.has(rowNum))) {
+          skippedCount++;
+          continue;
+        }
+        setAiStatus(`Guardando ${savedCount + 1} / ${studentsData.length - skippedCount}...`);
+        await db.saveStudent({
+          name: row['Fullname'],
+          studentNumber: String(row['Student Number'] || ''),
+          courseHistory: 'Current',
+          currentCertificate: row['Current Certificate'] || '',
+          status: row['Student Status'] || 'Active',
+          phone: row['Whatsapp'] || '',
+          mentorId: profile?.id || 'mentor_123',
+        });
+        savedCount++;
+      }
+
+      setAiProgress(100);
+      setAiStatus(
+        skippedCount > 0
+          ? `¡${savedCount} nuevos! ${skippedCount} ya existían.`
+          : '¡Importación completada!'
+      );
+      await new Promise(r => setTimeout(r, 1200));
+
+      window.dispatchEvent(new CustomEvent('supabase-db-update'));
+    } catch (err: any) {
+      clearInterval(progressInterval);
+      console.error('Error procesando imagen con IA:', err);
+      alert('Hubo un error al procesar la imagen con IA: ' + (err.message || err));
+    } finally {
+      setIsProcessingAI(false);
+      setAiProgress(0);
+      setAiStatus('');
+      if (imageInputRef.current) imageInputRef.current.value = '';
+    }
   };
 
   const handleExportExcel = () => {
@@ -174,15 +351,40 @@ export const StudentTracker: React.FC = () => {
     setSortConfig({ key, direction });
   };
 
+  const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.checked) {
+      setSelectedStudents(new Set(filteredStudents.map(s => s.id)));
+    } else {
+      setSelectedStudents(new Set());
+    }
+  };
+
+  const handleSelectStudent = (id: string) => {
+    const newSet = new Set(selectedStudents);
+    if (newSet.has(id)) newSet.delete(id);
+    else newSet.add(id);
+    setSelectedStudents(newSet);
+  };
+
+  const handleMassDelete = async () => {
+    if (window.confirm(`¿Estás seguro de eliminar ${selectedStudents.size} alumnos seleccionados?`)) {
+      await Promise.all(Array.from(selectedStudents).map(id => db.deleteStudent(id)));
+      window.dispatchEvent(new CustomEvent('supabase-db-update'));
+      setSelectedStudents(new Set());
+    }
+  };
+
   const filteredStudents = [...students].filter(s => 
     s.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     s.studentNumber?.includes(searchTerm)
   ).sort((a, b) => {
     if (!sortConfig) {
-      // Default sort by lastContactDate desc
-      const dateA = a.lastContactDate ? new Date(a.lastContactDate).getTime() : 0;
-      const dateB = b.lastContactDate ? new Date(b.lastContactDate).getTime() : 0;
-      return dateB - dateA;
+      // Default sort by createdAt desc (so newest imports are at the top)
+      // This prevents rows from jumping around when interactions are updated
+      const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (dateB !== dateA) return dateB - dateA;
+      return a.name.localeCompare(b.name);
     }
 
     const { key, direction } = sortConfig;
@@ -248,13 +450,91 @@ export const StudentTracker: React.FC = () => {
   };
 
   return (
-    <div className="p-4 lg:p-8 space-y-8 animate-in fade-in duration-500">
+    <div className="p-4 lg:p-8 space-y-8 animate-in fade-in duration-500 relative">
+      {/* AI Processing Overlay */}
+      <AnimatePresence>
+        {isProcessingAI && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="bg-white rounded-3xl shadow-2xl p-10 flex flex-col items-center gap-6 w-80"
+            >
+              <div className="relative w-20 h-20">
+                <div className="absolute inset-0 rounded-full bg-purple-100 flex items-center justify-center">
+                  <Sparkles size={36} className="text-purple-500" />
+                </div>
+                <svg className="absolute inset-0 w-20 h-20 -rotate-90" viewBox="0 0 80 80">
+                  <circle cx="40" cy="40" r="36" fill="none" stroke="#ede9fe" strokeWidth="6" />
+                  <motion.circle
+                    cx="40" cy="40" r="36" fill="none"
+                    stroke="#a855f7" strokeWidth="6"
+                    strokeLinecap="round"
+                    strokeDasharray={`${2 * Math.PI * 36}`}
+                    animate={{ strokeDashoffset: 2 * Math.PI * 36 * (1 - aiProgress / 100) }}
+                    transition={{ duration: 0.4 }}
+                  />
+                </svg>
+              </div>
+              <div className="text-center space-y-1">
+                <p className="text-sm font-black text-dark">{aiStatus}</p>
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Procesando con IA · Por favor espere</p>
+              </div>
+              <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                <motion.div
+                  className="h-2 bg-gradient-to-r from-purple-400 to-purple-600 rounded-full"
+                  animate={{ width: `${aiProgress}%` }}
+                  transition={{ duration: 0.4 }}
+                />
+              </div>
+              <span className="text-2xl font-black text-purple-500">{Math.round(aiProgress)}%</span>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 px-2">
         <div className="shrink-0">
           <h2 className="text-2xl font-black text-dark tracking-tight uppercase">Seguimiento</h2>
         </div>
         
         <div className="flex flex-wrap items-center gap-2 flex-1 justify-end">
+          {selectedStudents.size > 0 && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 rounded-xl border border-primary/20 shrink-0 animate-in fade-in slide-in-from-right-4">
+              <span className="text-[10px] font-black text-primary uppercase tracking-widest">{selectedStudents.size} seleccionados</span>
+              
+              <select 
+                onChange={async (e) => {
+                  if (!e.target.value) return;
+                  if (window.confirm(`¿Actualizar el curso de ${selectedStudents.size} alumnos a "${e.target.value}"?`)) {
+                    await Promise.all(Array.from(selectedStudents).map(id => db.saveStudent({ id, courseHistory: e.target.value })));
+                    window.dispatchEvent(new CustomEvent('supabase-db-update'));
+                    setSelectedStudents(new Set());
+                  }
+                  e.target.value = "";
+                }}
+                className="ml-2 px-2 py-1 bg-white rounded border border-primary/20 text-[10px] font-bold text-primary outline-none cursor-pointer"
+              >
+                <option value="">Cambiar Curso...</option>
+                {COURSE_HISTORY_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+              </select>
+
+              <button 
+                onClick={handleMassDelete}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-rose-600 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors ml-1 font-bold text-[10px] uppercase tracking-widest border border-rose-200"
+                title="Eliminar seleccionados"
+              >
+                <Trash2 size={14} />
+                <span>Eliminar</span>
+              </button>
+            </div>
+          )}
           <div className="relative group w-full md:w-64">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-primary transition-colors" size={16} />
             <input 
@@ -295,6 +575,24 @@ export const StudentTracker: React.FC = () => {
             <FileText size={16} className="text-secondary" />
             <span>Exportar</span>
           </button>
+
+          <button 
+            onClick={() => imageInputRef.current?.click()}
+            disabled={isProcessingAI}
+            className={`flex items-center gap-2 px-4 py-2.5 bg-white text-slate-600 border border-slate-100 rounded-xl font-bold hover:bg-slate-50 transition-all shadow-sm shrink-0 text-xs ${isProcessingAI ? 'opacity-75 cursor-not-allowed' : ''}`}
+          >
+            {isProcessingAI ? <Clock className="animate-spin text-purple-500" size={16} /> : <Sparkles size={16} className="text-purple-500" />}
+            <span className="hidden sm:inline">{isProcessingAI ? 'Procesando...' : 'IA Import'}</span>
+            <span className="sm:hidden">{isProcessingAI ? '...' : 'IA'}</span>
+          </button>
+
+          <input 
+            type="file" 
+            ref={imageInputRef} 
+            onChange={handleImageUpload} 
+            accept="image/*" 
+            className="hidden" 
+          />
           <input 
             type="file" 
             ref={fileInputRef} 
@@ -303,10 +601,56 @@ export const StudentTracker: React.FC = () => {
             className="hidden" 
           />
 
+          {/* Import Mapping Modal */}
+          {importModal.open && (
+            <ImportMappingModal
+              fileName={importModal.fileName}
+              columns={importModal.columns}
+              rows={importModal.rows}
+              mapping={importModal.mapping}
+              onMappingChange={(field, col) =>
+                setImportModal(prev => ({ ...prev, mapping: { ...prev.mapping, [field]: col } }))
+              }
+              onClose={() => setImportModal(prev => ({ ...prev, open: false }))}
+              onImport={async (mapping) => {
+                const existingNames   = new Set(students.map(s => s.name.toLowerCase().trim()));
+                const existingNumbers = new Set(students.map(s => s.studentNumber?.toLowerCase().trim()).filter(Boolean));
+
+                let count = 0;
+                let skipped = 0;
+                for (const row of importModal.rows) {
+                  const name = mapping.name ? String(row[mapping.name] || '').trim() : '';
+                  if (!name) continue;
+                  const rowNum = mapping.studentNumber ? String(row[mapping.studentNumber] || '').toLowerCase().trim() : '';
+                  // Skip duplicates
+                  if (existingNames.has(name.toLowerCase()) || (rowNum && existingNumbers.has(rowNum))) {
+                    skipped++;
+                    continue;
+                  }
+                  await db.saveStudent({
+                    name,
+                    studentNumber: mapping.studentNumber ? String(row[mapping.studentNumber] || '') : '',
+                    phone:              mapping.phone ? String(row[mapping.phone] || '') : '',
+                    currentCertificate: mapping.currentCertificate ? String(row[mapping.currentCertificate] || '') : '',
+                    courseHistory:      mapping.courseHistory ? String(row[mapping.courseHistory] || '') : 'Current',
+                    mentorId: profile?.id || 'mentor_123',
+                  });
+                  count++;
+                }
+                window.dispatchEvent(new CustomEvent('supabase-db-update'));
+                setImportModal(prev => ({ ...prev, open: false }));
+                const msg = skipped > 0
+                  ? `¡${count} alumnos importados! (${skipped} omitidos porque ya existen en el sistema)`
+                  : `¡${count} alumnos importados correctamente!`;
+                alert(msg);
+              }}
+            />
+          )}
+
           <button 
             onClick={() => {
               setEditingStudent(null);
-              setNewStudent({ name: '', studentNumber: '', phone: '', courseHistory: '' });
+              setNewStudent({ name: '', studentNumber: '', phone: '', courseHistory: 'Current' });
               setIsAddingStudent(true);
             }}
             className="flex items-center gap-2 px-5 py-2.5 bg-dark text-white rounded-xl font-bold shadow-lg hover:brightness-125 transition-all text-xs shrink-0"
@@ -419,10 +763,18 @@ export const StudentTracker: React.FC = () => {
           </div>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-left min-w-[1200px]">
+          <table className="w-full text-left min-w-[950px]">
             <thead>
               <tr className="text-[10px] uppercase tracking-widest text-slate-500 border-b border-slate-200 bg-slate-50/50">
-                <th className="px-6 py-5 font-black w-64 cursor-pointer hover:text-dark transition-colors group" onClick={() => handleSort('name')}>
+                <th className="px-4 py-5 font-black w-10">
+                  <input 
+                    type="checkbox" 
+                    className="rounded border-slate-300 text-primary focus:ring-primary cursor-pointer w-4 h-4"
+                    checked={filteredStudents.length > 0 && selectedStudents.size === filteredStudents.length}
+                    onChange={handleSelectAll}
+                  />
+                </th>
+                <th className="px-3 py-3 font-black cursor-pointer hover:text-dark transition-colors group" onClick={() => handleSort('name')}>
                   <div className="flex items-center gap-2">
                     Alumno / ID
                     <SortIcon columnKey="name" />
@@ -458,13 +810,16 @@ export const StudentTracker: React.FC = () => {
                     <SortIcon columnKey="responseType" />
                   </div>
                 </th>
-                <th className="px-6 py-5 font-black cursor-pointer hover:text-dark transition-colors group" onClick={() => handleSort('content')}>
+                <th className="px-3 py-3 font-black">
+                  Contacto / Info
+                </th>
+                <th className="px-3 py-3 font-black cursor-pointer hover:text-dark transition-colors group" onClick={() => handleSort('content')}>
                   <div className="flex items-center gap-2">
                     Observaciones
                     <SortIcon columnKey="content" />
                   </div>
                 </th>
-                <th className="px-6 py-5 font-black text-right">Acciones</th>
+                <th className="px-3 py-3 font-black text-right sticky right-0 bg-slate-50/95 backdrop-blur z-10 shadow-[-12px_0_15px_-4px_rgba(0,0,0,0.05)] w-12"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -475,19 +830,29 @@ export const StudentTracker: React.FC = () => {
                 
                 return (
                   <tr key={student.id} className={`${getCourseStatusColor(student.courseHistory)} transition-all duration-300 group`}>
-                    <td className="px-6 py-6 border-b border-slate-100">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-dark text-white flex items-center justify-center font-black text-xs shadow-sm">
-                          {student.name.charAt(0)}
+                    <td className="px-4 py-3 border-b border-slate-100">
+                      <input 
+                        type="checkbox" 
+                        className="rounded border-slate-300 text-primary focus:ring-primary cursor-pointer w-4 h-4"
+                        checked={selectedStudents.has(student.id)}
+                        onChange={() => handleSelectStudent(student.id)}
+                      />
+                    </td>
+                    <td className="px-3 py-3 border-b border-slate-100">
+                      <div className="min-w-0">
+                        <div className="font-bold text-dark text-xs truncate">
+                          {student.name}
+                          {!student.lastContactDate && (
+                            <span className="ml-2 px-1.5 py-0.5 bg-emerald-100 text-emerald-600 text-[8px] uppercase font-black rounded inline-block align-middle">
+                              Nuevo
+                            </span>
+                          )}
                         </div>
-                        <div className="min-w-0">
-                          <div className="font-bold text-dark text-sm truncate">{student.name}</div>
-                          {student.studentNumber && <div className="text-[9px] text-slate-500 font-black">#{student.studentNumber}</div>}
-                        </div>
+                        {student.studentNumber && <div className="text-[9px] text-slate-500 font-black">#{student.studentNumber}</div>}
                       </div>
                     </td>
                     
-                    <td className="px-6 py-4 border-b border-slate-100">
+                    <td className="px-3 py-3 border-b border-slate-100 min-w-[100px]">
                       <div className="flex flex-col gap-1">
                         <div className="flex flex-col">
                           <span className="text-[7px] uppercase font-black text-slate-400 leading-none">Último</span>
@@ -504,88 +869,114 @@ export const StudentTracker: React.FC = () => {
                       </div>
                     </td>
                     
-                    <td className="px-4 py-4 border-b border-slate-100">
+                    <td className="px-2 py-3 border-b border-slate-100">
                       <select 
                         value={student.courseHistory}
                         onChange={(e) => handleUpdateStudentField(student.id, 'courseHistory', e.target.value)}
-                        className="w-full bg-white border border-slate-200 rounded-lg py-2 px-3 text-[11px] font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/40 appearance-none cursor-pointer shadow-sm"
+                        className="w-full bg-white border border-slate-200 rounded py-1 px-1.5 text-[10px] font-bold text-slate-800 outline-none focus:ring-1 focus:ring-primary/40 appearance-none cursor-pointer shadow-sm min-w-[90px]"
                       >
                         {COURSE_HISTORY_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                       </select>
                     </td>
 
-                    <td className="px-4 py-4 border-b border-slate-100">
+                    <td className="px-2 py-3 border-b border-slate-100">
                       <select 
                         disabled={selectedWeek === 0}
                         value={weeklyInteraction?.typeContact || ''}
                         onChange={(e) => handleUpdateInteractionField(student.id, 'typeContact', e.target.value)}
-                        className={`w-full bg-white border border-slate-200 rounded-lg py-2 px-3 text-[11px] font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/40 appearance-none cursor-pointer shadow-sm ${selectedWeek === 0 ? 'opacity-50' : ''}`}
+                        className={`w-full bg-white border border-slate-200 rounded py-1 px-1.5 text-[10px] font-bold text-slate-800 outline-none focus:ring-1 focus:ring-primary/40 appearance-none cursor-pointer shadow-sm min-w-[90px] ${selectedWeek === 0 ? 'opacity-50' : ''}`}
                       >
-                        <option value="">- Seleccionar -</option>
+                        <option value="">- Tipo -</option>
                         {CONTACT_TYPE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                       </select>
                     </td>
 
-                    <td className="px-4 py-4 border-b border-slate-100">
+                    <td className="px-2 py-3 border-b border-slate-100">
                       <select 
                         disabled={selectedWeek === 0}
                         value={weeklyInteraction?.messages || ''}
                         onChange={(e) => handleUpdateInteractionField(student.id, 'messages', e.target.value)}
-                        className={`w-full bg-white border border-slate-200 rounded-lg py-2 px-3 text-[11px] font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/40 appearance-none cursor-pointer shadow-sm ${selectedWeek === 0 ? 'opacity-50' : ''}`}
+                        className={`w-full bg-white border border-slate-200 rounded py-1 px-1.5 text-[10px] font-bold text-slate-800 outline-none focus:ring-1 focus:ring-primary/40 appearance-none cursor-pointer shadow-sm min-w-[90px] ${selectedWeek === 0 ? 'opacity-50' : ''}`}
                       >
-                        <option value="">- Seleccionar -</option>
+                        <option value="">- Msg -</option>
                         {MESSAGE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                       </select>
                     </td>
 
-                    <td className="px-4 py-4 border-b border-slate-100">
+                    <td className="px-2 py-3 border-b border-slate-100">
                       <select 
                         disabled={selectedWeek === 0}
                         value={weeklyInteraction?.responseType || 'No Response'}
                         onChange={(e) => handleUpdateInteractionField(student.id, 'responseType', e.target.value)}
-                        className={`max-w-[200px] w-full bg-white border border-slate-200 rounded-lg py-2 px-3 text-[10px] font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/40 appearance-none cursor-pointer truncate shadow-sm ${selectedWeek === 0 ? 'opacity-50' : ''}`}
+                        className={`w-full bg-white border border-slate-200 rounded py-1 px-1.5 text-[10px] font-bold text-slate-800 outline-none focus:ring-1 focus:ring-primary/40 appearance-none cursor-pointer truncate shadow-sm min-w-[100px] ${selectedWeek === 0 ? 'opacity-50' : ''}`}
                       >
                         {RESPONSE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                       </select>
                     </td>
 
-                    <td className="px-4 py-4 border-b border-slate-100">
-                      <textarea 
+                    <td className="px-2 py-3 border-b border-slate-100 min-w-[110px]">
+                      <div className="flex flex-col gap-1.5">
+                        {student.phone && (
+                          <a href={`https://wa.me/${student.phone.replace(/\D/g,'')}`} target="_blank" rel="noopener noreferrer"
+                            className="flex items-center gap-1 text-[9px] font-black text-emerald-600 hover:text-emerald-700 transition-colors w-fit"
+                          >
+                            <Phone size={10} />
+                            <span>{student.phone}</span>
+                          </a>
+                        )}
+                        {student.currentCertificate && (
+                          <span className="px-1.5 py-0.5 bg-sky-50 text-sky-700 text-[8px] font-black rounded border border-sky-100 w-fit line-clamp-1" title={student.currentCertificate}>
+                            {student.currentCertificate}
+                          </span>
+                        )}
+                        {!student.phone && !student.currentCertificate && (
+                          <span className="text-[10px] text-slate-300 font-bold">—</span>
+                        )}
+                      </div>
+                    </td>
+
+                    <td className="px-2 py-3 border-b border-slate-100">
+                      <DebouncedTextarea 
                         disabled={selectedWeek === 0}
                         rows={1}
                         placeholder="..."
-                        value={weeklyInteraction?.content || ''}
-                        onChange={(e) => handleUpdateInteractionField(student.id, 'content', e.target.value)}
-                        className={`w-full bg-white border border-slate-200 rounded-lg py-2 px-3 text-[11px] font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/40 resize-none min-h-[40px] shadow-sm ${selectedWeek === 0 ? 'opacity-50' : ''}`}
+                        initialValue={weeklyInteraction?.content || ''}
+                        onSave={(val) => handleUpdateInteractionField(student.id, 'content', val)}
+                        className={`w-full bg-white border border-slate-200 rounded py-1.5 px-2 text-[10px] font-bold text-slate-800 outline-none focus:ring-1 focus:ring-primary/40 resize-none min-h-[28px] shadow-sm min-w-[120px] ${selectedWeek === 0 ? 'opacity-50' : ''}`}
                       />
                     </td>
 
-                    <td className="px-6 py-6 text-right border-b border-slate-100">
-                      <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button 
-                          onClick={() => {
-                            setSelectedStudentForChat(student);
-                            setChatModalOpen(true);
-                          }}
-                          className="p-2.5 text-slate-400 hover:text-secondary hover:bg-secondary/10 rounded-xl transition-all"
-                          title="Historial de Chat"
-                        >
-                          <MessageSquare size={16} />
+                    <td className="px-3 py-3 border-b border-slate-100 sticky right-0 bg-white/95 backdrop-blur z-10 shadow-[-12px_0_15px_-4px_rgba(0,0,0,0.05)] group-hover:bg-slate-50/95 transition-colors align-middle text-center">
+                      <div className="relative inline-block text-left group/dropdown">
+                        <button className="p-1.5 text-slate-400 hover:text-primary hover:bg-primary/10 rounded-lg transition-all focus:outline-none">
+                          <MoreVertical size={16} />
                         </button>
-                        <button 
-                          onClick={() => handleEdit(student)}
-                          className="p-2.5 text-slate-400 hover:text-primary hover:bg-primary/10 rounded-xl transition-all"
-                          title="Editar"
-                        >
-                          <Edit2 size={16} />
-                        </button>
-                        <button 
-                          onClick={() => handleDelete(student.id)}
-                          className="p-2.5 text-slate-400 hover:text-secondary hover:bg-secondary/10 rounded-xl transition-all"
-                          title="Eliminar"
-                        >
-                          <Trash2 size={16} />
-                        </button>
+                        <div className="absolute right-0 mt-1 w-36 bg-white rounded-xl shadow-xl border border-slate-100 opacity-0 invisible group-hover/dropdown:opacity-100 group-hover/dropdown:visible transition-all z-50 transform scale-95 group-hover/dropdown:scale-100 origin-top-right [tr:nth-last-child(-n+3)_&]:bottom-full [tr:nth-last-child(-n+3)_&]:top-auto [tr:nth-last-child(-n+3)_&]:mb-1 [tr:nth-last-child(-n+3)_&]:mt-0 [tr:nth-last-child(-n+3)_&]:origin-bottom-right">
+                          <div className="p-1 flex flex-col gap-0.5">
+                            <button 
+                              onClick={() => {
+                                setSelectedStudentForChat(student);
+                                setChatModalOpen(true);
+                              }}
+                              className="flex items-center gap-2 px-3 py-2 text-[10px] font-bold text-slate-600 hover:text-secondary hover:bg-secondary/10 rounded-lg transition-all w-full text-left"
+                            >
+                              <MessageSquare size={12} /> Chat
+                            </button>
+                            <button 
+                              onClick={() => handleEdit(student)}
+                              className="flex items-center gap-2 px-3 py-2 text-[10px] font-bold text-slate-600 hover:text-primary hover:bg-primary/10 rounded-lg transition-all w-full text-left"
+                            >
+                              <Edit2 size={12} /> Editar
+                            </button>
+                            <div className="h-px bg-slate-100 my-0.5 w-full" />
+                            <button 
+                              onClick={() => handleDelete(student.id)}
+                              className="flex items-center gap-2 px-3 py-2 text-[10px] font-bold text-rose-600 hover:bg-rose-50 rounded-lg transition-all w-full text-left"
+                            >
+                              <Trash2 size={12} /> Eliminar
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     </td>
                   </tr>
@@ -670,6 +1061,25 @@ export const StudentTracker: React.FC = () => {
                 </div>
               </div>
 
+              {/* WhatsApp & Certificate row */}
+              {(student.phone || student.currentCertificate) && (
+                <div className="flex flex-wrap gap-3 pt-1">
+                  {student.phone && (
+                    <a href={`https://wa.me/${student.phone.replace(/\D/g,'')}`} target="_blank" rel="noopener noreferrer"
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-xl text-[11px] font-bold hover:bg-emerald-100 transition-colors"
+                    >
+                      <Phone size={12} />
+                      <span>{student.phone}</span>
+                    </a>
+                  )}
+                  {student.currentCertificate && (
+                    <span className="flex items-center px-3 py-1.5 bg-sky-50 text-sky-700 border border-sky-100 rounded-xl text-[10px] font-black">
+                      {student.currentCertificate}
+                    </span>
+                  )}
+                </div>
+              )}
+
               <div className="space-y-3 pt-4 border-t border-slate-200">
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1">
@@ -699,12 +1109,12 @@ export const StudentTracker: React.FC = () => {
                 </div>
                 <div className="space-y-1">
                   <label className="text-[9px] uppercase font-black tracking-widest text-slate-500">Observaciones</label>
-                  <textarea 
+                  <DebouncedTextarea 
                     disabled={selectedWeek === 0}
                     rows={2}
                     placeholder="Sin observaciones..."
-                    value={weeklyInteraction?.content || ''}
-                    onChange={(e) => handleUpdateInteractionField(student.id, 'content', e.target.value)}
+                    initialValue={weeklyInteraction?.content || ''}
+                    onSave={(val) => handleUpdateInteractionField(student.id, 'content', val)}
                     className="w-full bg-white border border-slate-200 rounded-lg py-2.5 px-3 text-xs font-bold text-slate-800 shadow-sm resize-none"
                   />
                 </div>
@@ -722,6 +1132,158 @@ export const StudentTracker: React.FC = () => {
   );
 };
 
+// ─── IMPORT MAPPING MODAL ───────────────────────────────────────────────────
+
+const DB_FIELDS: { key: string; label: string; required?: boolean }[] = [
+  { key: 'name',               label: 'Nombre Completo',   required: true },
+  { key: 'studentNumber',      label: 'Número de Alumno' },
+  { key: 'phone',              label: 'WhatsApp / Teléfono' },
+  { key: 'currentCertificate', label: 'Certificado Actual' },
+  { key: 'courseHistory',      label: 'Course History' },
+];
+
+interface ImportMappingModalProps {
+  fileName: string;
+  columns: string[];
+  rows: any[];
+  mapping: Record<string, string>;
+  onMappingChange: (field: string, col: string) => void;
+  onClose: () => void;
+  onImport: (mapping: Record<string, string>) => Promise<void>;
+}
+
+const ImportMappingModal: React.FC<ImportMappingModalProps> = ({
+  fileName, columns, rows, mapping, onMappingChange, onClose, onImport,
+}) => {
+  const [loading, setLoading] = useState(false);
+  const preview = rows.slice(0, 3);
+  const mappedCount = rows.filter(r => mapping.name && String(r[mapping.name] || '').trim()).length;
+
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-dark/60 backdrop-blur-sm"
+    >
+      <motion.div initial={{ scale: 0.95, y: 20 }} animate={{ scale: 1, y: 0 }}
+        className="bg-white w-full max-w-2xl rounded-[28px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+      >
+        {/* Header */}
+        <div className="px-8 pt-7 pb-5 border-b border-slate-100 flex justify-between items-start">
+          <div className="flex items-center gap-4">
+            <div className="w-11 h-11 bg-green-50 text-green-600 rounded-2xl flex items-center justify-center">
+              <FileSpreadsheet size={22} />
+            </div>
+            <div>
+              <h3 className="text-base font-black text-dark">Importar Excel</h3>
+              <p className="text-[11px] text-slate-400 font-bold mt-0.5 truncate max-w-[280px]">{fileName}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+            <X size={20} className="text-slate-400" />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 p-8 space-y-7">
+
+          {/* Step 1 — Column Mapping */}
+          <div>
+            <p className="text-[10px] font-black text-dark uppercase tracking-widest mb-4">
+              Paso 1 · Mapear columnas
+            </p>
+            <div className="space-y-3">
+              {DB_FIELDS.map(field => (
+                <div key={field.key} className="flex items-center gap-3">
+                  <div className="w-44 shrink-0">
+                    <p className="text-[11px] font-black text-slate-700">{field.label}</p>
+                    {field.required && <span className="text-[9px] text-rose-500 font-bold">Requerido</span>}
+                  </div>
+                  <div className="flex-1">
+                    <select
+                      value={mapping[field.key] || ''}
+                      onChange={e => onMappingChange(field.key, e.target.value)}
+                      className={`w-full px-3 py-2 rounded-xl border text-[11px] font-bold outline-none transition-all cursor-pointer ${
+                        mapping[field.key]
+                          ? 'border-primary/30 bg-primary/5 text-primary focus:ring-2 focus:ring-primary/20'
+                          : 'border-slate-200 bg-white text-slate-400 focus:ring-2 focus:ring-slate-100'
+                      }`}
+                    >
+                      <option value="">— Sin mapear —</option>
+                      {columns.map(col => (
+                        <option key={col} value={col}>{col}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {mapping[field.key] && (
+                    <div className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center shrink-0">
+                      <span className="text-white text-[9px] font-black">✓</span>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Step 2 — Preview */}
+          {mapping.name && preview.length > 0 && (
+            <div>
+              <p className="text-[10px] font-black text-dark uppercase tracking-widest mb-3">
+                Paso 2 · Previsualización ({mappedCount} alumnos a importar)
+              </p>
+              <div className="rounded-2xl border border-slate-100 overflow-hidden">
+                <table className="w-full text-[10px]">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-100">
+                      {DB_FIELDS.filter(f => mapping[f.key]).map(f => (
+                        <th key={f.key} className="px-3 py-2 text-left font-black text-slate-500 uppercase tracking-wide">{f.label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.map((row, i) => (
+                      <tr key={i} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/50">
+                        {DB_FIELDS.filter(f => mapping[f.key]).map(f => (
+                          <td key={f.key} className="px-3 py-2 font-medium text-slate-700 truncate max-w-[120px]">
+                            {String(row[mapping[f.key]] || '—')}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {rows.length > 3 && (
+                <p className="text-[10px] text-slate-400 font-medium mt-2 px-1">
+                  +{rows.length - 3} filas más no mostradas en la previsualización
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-8 py-5 border-t border-slate-50 flex justify-between items-center bg-white">
+          <p className="text-[10px] text-slate-400 font-bold">
+            {rows.length} filas en el archivo
+          </p>
+          <div className="flex gap-3">
+            <button onClick={onClose}
+              className="px-6 py-2.5 bg-slate-100 text-slate-500 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-200 transition-all">
+              Cancelar
+            </button>
+            <button
+              disabled={!mapping.name || loading}
+              onClick={async () => { setLoading(true); await onImport(mapping); setLoading(false); }}
+              className="flex items-center gap-2 px-8 py-2.5 bg-green-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-green-600 transition-all shadow-md disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {loading ? <Clock size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />}
+              {loading ? 'Importando...' : `Importar ${mappedCount} alumnos`}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+};
+
 interface ChatHistoryModalProps {
   student: Student;
   interaction?: Interaction;
@@ -732,32 +1294,43 @@ interface ChatHistoryModalProps {
 }
 
 const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ student, interaction, studentInteractions, onClose, onSave, onMessageTypeChange }) => {
-  const [history, setHistory] = useState(interaction?.chatHistory || '');
+  const [newEntry, setNewEntry] = useState('');
+  const [copied, setCopied] = useState<string | null>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
-  const [activeTab, setActiveTab] = useState<'import' | 'history' | 'templates'>('import');
+  const [activeTab, setActiveTab] = useState<'new' | 'history' | 'templates'>('new');
   const [templates, setTemplates] = useState<Template[]>([]);
 
   useEffect(() => {
     db.getTemplates().then(t => setTemplates(t)).catch(console.error);
   }, []);
 
-  const MESSAGE_TYPES = ['Follow up', 'RA', 'Video Call'];
-
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     const reader = new FileReader();
-    reader.onload = (evt) => {
-      const content = evt.target?.result as string;
-      setHistory(content);
-    };
+    reader.onload = (evt) => setNewEntry(evt.target?.result as string);
     reader.readAsText(file);
   };
 
-  const handleCopyTemplate = (content: string) => {
+  const handleSaveEntry = () => {
+    if (!newEntry.trim()) return;
+    const now = new Date();
+    const ts = now.toLocaleString('es-AR', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const separator = `\n\n── ${ts} ──────────────────────\n`;
+    const existing = interaction?.chatHistory || '';
+    const updated = existing
+      ? `${existing}${separator}${newEntry.trim()}`
+      : `── ${ts} ──────────────────────\n${newEntry.trim()}`;
+    onSave(updated);
+    setNewEntry('');
+    setActiveTab('history');
+  };
+
+
+  const handleCopy = (content: string, id: string) => {
     navigator.clipboard.writeText(content);
-    alert('Plantilla copiada al portapapeles');
+    setCopied(id);
+    setTimeout(() => setCopied(null), 2000);
   };
 
   const handleWhatsAppClick = (content?: string) => {
@@ -770,212 +1343,194 @@ const ChatHistoryModal: React.FC<ChatHistoryModalProps> = ({ student, interactio
     }
   };
 
+  // Build flat timeline from all interactions
+  const allEntries = studentInteractions
+    .filter(i => i.chatHistory || i.content)
+    .sort((a, b) => {
+      if (!a.date && !b.date) return a.week - b.week;
+      if (!a.date) return 1;
+      if (!b.date) return -1;
+      return new Date(a.date).getTime() - new Date(b.date).getTime();
+    });
+
   return (
-    <motion.div 
+    <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-dark/60 backdrop-blur-sm"
     >
-      <motion.div 
-        initial={{ scale: 0.9, y: 20 }}
+      <motion.div
+        initial={{ scale: 0.95, y: 20 }}
         animate={{ scale: 1, y: 0 }}
-        className="bg-white w-full max-w-3xl rounded-[32px] shadow-2xl overflow-hidden flex flex-col h-[85vh]"
+        className="bg-white w-full max-w-2xl rounded-[32px] shadow-2xl overflow-hidden flex flex-col h-[88vh]"
       >
-        <div className="p-8 border-b border-slate-50 flex justify-between items-center bg-slate-50/50">
+        {/* Header */}
+        <div className="px-8 pt-6 pb-5 border-b border-slate-100 flex justify-between items-start bg-white">
           <div className="flex items-center gap-4">
-            <div className="w-12 h-12 bg-primary text-dark rounded-2xl flex items-center justify-center shadow-lg shadow-primary/20">
-              <MessageSquare size={24} />
+            <div className="w-11 h-11 bg-gradient-to-br from-primary to-primary/70 text-dark rounded-2xl flex items-center justify-center shadow-md">
+              <MessageSquare size={20} />
             </div>
             <div>
-              <h3 className="text-xl font-black text-dark uppercase tracking-tight">Registro de Mensajes</h3>
-              <p className="text-sm font-bold text-slate-500">{student.name} {student.phone ? `- ${student.phone}` : ''}</p>
+              <h3 className="text-base font-black text-dark tracking-tight">{student.name}</h3>
+              <p className="text-[11px] font-bold text-slate-400">{student.phone || 'Sin teléfono'} · Sem. {interaction?.week ?? '—'}</p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
-            <X size={24} className="text-slate-400" />
+            <X size={20} className="text-slate-400" />
           </button>
         </div>
 
-        <div className="flex border-b border-slate-100 px-8 pt-4 bg-slate-50/30 gap-4">
-          <button 
-            onClick={() => setActiveTab('import')}
-            className={`pb-4 px-2 text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'import' ? 'text-primary border-b-2 border-primary' : 'text-slate-400 hover:text-slate-600'}`}
-          >
-            Registro de Chat
-          </button>
-          <button 
-            onClick={() => setActiveTab('history')}
-            className={`pb-4 px-2 text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'history' ? 'text-primary border-b-2 border-primary' : 'text-slate-400 hover:text-slate-600'}`}
-          >
-            Historial
-          </button>
-          <button 
-            onClick={() => setActiveTab('templates')}
-            className={`pb-4 px-2 text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'templates' ? 'text-primary border-b-2 border-primary' : 'text-slate-400 hover:text-slate-600'}`}
-          >
-            Nuevos Mensajes
-          </button>
+        {/* Tabs */}
+        <div className="flex border-b border-slate-100 bg-slate-50/50 px-6">
+          {(['new', 'history', 'templates'] as const).map((tab, idx) => {
+            const labels = ['Nuevo Registro', 'Historial', 'Nuevo Mensaje'];
+            return (
+              <button key={tab} onClick={() => setActiveTab(tab)}
+                className={`px-4 py-4 text-[10px] font-black uppercase tracking-widest transition-all border-b-2 ${
+                  activeTab === tab ? 'text-primary border-primary' : 'text-slate-400 border-transparent hover:text-slate-600'
+                }`}
+              >
+                {labels[idx]}
+              </button>
+            );
+          })}
         </div>
 
-        <div className="p-8 overflow-y-auto flex-1">
-          {activeTab === 'import' && (
-            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <label className="text-[10px] uppercase font-black tracking-widest text-slate-400 px-1">Mensaje (Opciones)</label>
-                    <div className="flex flex-wrap gap-2">
-                      {MESSAGE_TYPES.map(msgType => (
-                        <button
-                          key={msgType}
-                          onClick={() => onMessageTypeChange(msgType)}
-                          className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${
-                            interaction?.messages === msgType 
-                              ? 'bg-secondary text-white shadow-md' 
-                              : 'bg-slate-50 text-slate-400 hover:bg-slate-100'
-                          }`}
-                        >
-                          {msgType}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
+        <div className="flex-1 overflow-y-auto">
 
-                <div className="space-y-4">
-                  <div className="flex flex-col items-end gap-3 h-full justify-center">
-                    <p className="text-[10px] font-bold text-slate-400 text-right">Sube el archivo .txt exportado de WhatsApp para registrar el historial completo.</p>
-                    <button 
-                      onClick={() => chatInputRef.current?.click()}
-                      className="flex items-center gap-2 px-6 py-4 bg-green-500 text-white rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-green-600 transition-all shadow-lg shadow-green-200 w-full md:w-auto"
-                    >
-                      <Upload size={18} />
-                      Importar Chat
-                    </button>
-                  </div>
+          {/* ─── TAB 1: NUEVO REGISTRO ─── */}
+          {activeTab === 'new' && (
+            <div className="p-7 flex flex-col gap-5 h-full min-h-0">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <p className="text-xs font-black text-dark">Pega la respuesta del alumno</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5">Se guardará con fecha y hora automáticas en el historial</p>
                 </div>
-              </div>
-              
-              <input type="file" ref={chatInputRef} accept=".txt" className="hidden" onChange={handleFileUpload} />
-
-              <div className="space-y-2">
-                <label className="text-[10px] uppercase font-black tracking-widest text-slate-400 px-1">
-                  Notas / Contenido del Chat Actual
-                </label>
-                <textarea 
-                  value={history}
-                  onChange={(e) => setHistory(e.target.value)}
-                  placeholder="Escribe aquí los detalles del chat o sube el historial..."
-                  className="w-full h-64 p-6 bg-slate-50 border border-slate-100 rounded-3xl outline-none focus:ring-4 focus:ring-primary/10 text-sm font-medium text-slate-700 placeholder:text-slate-300 resize-none font-mono leading-relaxed"
-                />
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'history' && (
-            <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
-              <label className="text-[10px] uppercase font-black tracking-widest text-slate-400 px-1">
-                Historial de Mensajes Pasados
-              </label>
-              {studentInteractions.length === 0 || (studentInteractions.length === 1 && studentInteractions[0].id === interaction?.id) ? (
-                <div className="p-8 text-center bg-slate-50 rounded-3xl border border-slate-100">
-                  <p className="text-sm font-medium text-slate-400">No hay historial registrado aún.</p>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {studentInteractions
-                    .filter(i => i.id !== interaction?.id)
-                    .map((inter) => (
-                    <div key={inter.id} className="bg-slate-50/50 rounded-2xl p-5 border border-slate-100">
-                      <div className="flex justify-between items-start mb-2">
-                        <div className="text-[10px] font-black text-dark uppercase tracking-widest">Semana {inter.week} - {inter.messages || 'Sin tipo'}</div>
-                        <div className="text-[9px] text-slate-400 font-bold">{inter.date ? format(new Date(inter.date), 'dd MMM yyyy') : ''}</div>
-                      </div>
-                      {inter.chatHistory ? (
-                        <div className="text-[11px] text-slate-600 font-mono line-clamp-3 whitespace-pre-wrap">
-                          {inter.chatHistory}
-                        </div>
-                      ) : inter.content ? (
-                        <div className="text-[11px] text-slate-600 italic">
-                          {inter.content}
-                        </div>
-                      ) : (
-                        <div className="text-[11px] text-slate-400 italic">Sin contenido registrado.</div>
-                      )}
-                    </div>
+                <div className="flex gap-1.5 flex-wrap">
+                  {(['Follow up', 'RA', 'Video Call'] as const).map(t => (
+                    <button key={t} onClick={() => onMessageTypeChange(t)}
+                      className={`px-2.5 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all ${
+                        interaction?.messages === t ? 'bg-secondary text-white' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
+                      }`}
+                    >{t}</button>
                   ))}
                 </div>
-              )}
-            </div>
-          )}
-
-          {activeTab === 'templates' && (
-            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
-              <div className="flex items-center justify-between">
-                <label className="text-[10px] uppercase font-black tracking-widest text-slate-400 px-1">
-                  Generar Nuevo Mensaje
-                </label>
-                <button
-                  onClick={() => handleWhatsAppClick()}
-                  className="flex items-center gap-2 px-4 py-2 bg-green-500 text-white rounded-xl text-xs font-black uppercase tracking-widest hover:bg-green-600 transition-all shadow-md"
+              </div>
+              <textarea
+                value={newEntry}
+                onChange={(e) => setNewEntry(e.target.value)}
+                placeholder="Pega aquí la respuesta del alumno desde WhatsApp..."
+                className="flex-1 w-full min-h-[260px] p-5 bg-slate-50 border-2 border-slate-100 rounded-2xl outline-none focus:ring-4 focus:ring-primary/10 focus:border-primary/20 text-sm text-slate-700 placeholder:text-slate-300 resize-none leading-relaxed transition-all font-medium"
+                autoFocus
+              />
+              <div className="flex items-center justify-between gap-3">
+                <button onClick={() => chatInputRef.current?.click()}
+                  className="flex items-center gap-1.5 text-[10px] font-black text-slate-400 hover:text-slate-600 uppercase tracking-widest transition-all">
+                  <Upload size={13} /> Importar .txt
+                </button>
+                <input type="file" ref={chatInputRef} accept=".txt" className="hidden" onChange={handleFileUpload} />
+                <button onClick={handleSaveEntry} disabled={!newEntry.trim()}
+                  className="px-8 py-3 bg-primary text-dark rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-md shadow-primary/20 hover:brightness-110 active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  <Phone size={14} />
-                  WhatsApp Libre
+                  Guardar Registro
                 </button>
               </div>
+            </div>
+          )}
 
-              {templates.length === 0 ? (
-                <div className="p-8 text-center bg-slate-50 rounded-3xl border border-slate-100">
-                  <p className="text-sm font-medium text-slate-400">No hay plantillas guardadas en el repositorio.</p>
+          {/* ─── TAB 2: HISTORIAL (TIMELINE) ─── */}
+          {activeTab === 'history' && (
+            <div className="p-7">
+              {allEntries.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <div className="w-14 h-14 bg-slate-50 rounded-2xl flex items-center justify-center mb-4">
+                    <MessageSquare size={24} className="text-slate-200" />
+                  </div>
+                  <p className="text-sm font-bold text-slate-400">Sin historial aún</p>
+                  <p className="text-[11px] text-slate-300 mt-1">Usa "Nuevo Registro" para agregar la primera entrada</p>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 gap-4">
-                  {templates.map(template => (
-                    <div key={template.id} className="p-5 bg-slate-50 border border-slate-100 rounded-2xl flex flex-col gap-3 group hover:border-primary/30 transition-colors">
-                      <div className="flex justify-between items-center">
-                        <h4 className="text-xs font-black text-dark uppercase">{template.title}</h4>
-                        <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button 
-                            onClick={() => handleCopyTemplate(template.content)}
-                            className="px-3 py-1.5 bg-white text-primary rounded-lg text-[10px] font-black uppercase tracking-widest shadow-sm hover:bg-primary hover:text-white transition-all"
-                          >
-                            Copiar
-                          </button>
-                          <button 
-                            onClick={() => handleWhatsAppClick(template.content)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 bg-green-500 text-white rounded-lg text-[10px] font-black uppercase tracking-widest shadow-sm hover:bg-green-600 transition-all"
-                          >
-                            <Phone size={12} />
-                            Enviar
-                          </button>
+                <div className="relative">
+                  <div className="absolute left-[7px] top-2 bottom-2 w-0.5 bg-gradient-to-b from-primary/30 via-slate-200 to-transparent rounded-full" />
+                  <div className="space-y-6 pl-8">
+                    {allEntries.map((inter, idx) => (
+                      <div key={inter.id} className="relative">
+                        <div className="absolute -left-[26px] top-1.5 w-3.5 h-3.5 rounded-full bg-white border-2 border-primary shadow-sm" />
+                        <div className="flex items-center gap-2 mb-2 flex-wrap">
+                          <span className="px-2 py-0.5 bg-primary/10 text-primary rounded text-[9px] font-black uppercase tracking-widest">Sem. {inter.week}</span>
+                          {inter.date && (
+                            <span className="text-[10px] font-bold text-slate-400">{format(new Date(inter.date), "dd MMM yyyy")}</span>
+                          )}
+                          {inter.messages && (
+                            <span className="px-2 py-0.5 bg-secondary/10 text-secondary rounded text-[8px] font-black uppercase">{inter.messages}</span>
+                          )}
+                          {inter.typeContact && (
+                            <span className="px-2 py-0.5 bg-sky-50 text-sky-500 rounded text-[8px] font-black uppercase">{inter.typeContact}</span>
+                          )}
+                        </div>
+                        <div className="bg-slate-50 rounded-2xl border border-slate-100 p-4 text-[11px] text-slate-600 whitespace-pre-wrap leading-relaxed font-medium max-h-72 overflow-y-auto">
+                          {inter.chatHistory || inter.content}
                         </div>
                       </div>
-                      <p className="text-[11px] text-slate-500 font-medium whitespace-pre-wrap">{template.content}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ─── TAB 3: NUEVO MENSAJE (TEMPLATES) ─── */}
+          {activeTab === 'templates' && (
+            <div className="p-7 space-y-4">
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <div>
+                  <p className="text-xs font-black text-dark">Base de Conocimiento</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5">Copia o envía un mensaje predefinido</p>
+                </div>
+                {student.phone && (
+                  <button onClick={() => handleWhatsAppClick()}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-[#25D366] text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:brightness-110 transition-all shadow-md">
+                    <Phone size={13} /> Abrir WhatsApp
+                  </button>
+                )}
+              </div>
+              {templates.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-14 bg-slate-50 rounded-2xl border border-slate-100 text-center">
+                  <FileText size={28} className="text-slate-200 mb-3" />
+                  <p className="text-sm font-bold text-slate-400">Sin plantillas guardadas</p>
+                  <p className="text-[11px] text-slate-300 mt-1">Agrégalas desde "Base de Mensajes"</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {templates.map(template => (
+                    <div key={template.id} className="bg-slate-50 border border-slate-100 rounded-2xl p-4 hover:border-primary/20 hover:bg-white transition-all flex gap-4">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[10px] font-black text-dark uppercase tracking-wide mb-1.5">{template.title}</p>
+                        <p className="text-[11px] text-slate-500 leading-relaxed whitespace-pre-wrap line-clamp-4">{template.content}</p>
+                      </div>
+                      <div className="flex flex-col gap-2 shrink-0">
+                        <button onClick={() => handleCopy(template.content, template.id)}
+                          className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all ${
+                            copied === template.id ? 'bg-emerald-500 text-white' : 'bg-white text-primary border border-primary/20 hover:bg-primary hover:text-white'
+                          }`}
+                        >
+                          <FileText size={11} />
+                          {copied === template.id ? '✓ Copiado' : 'Copiar'}
+                        </button>
+                        {student.phone && (
+                          <button onClick={() => handleWhatsAppClick(template.content)}
+                            className="flex items-center gap-1.5 px-3 py-2 bg-[#25D366] text-white rounded-xl text-[9px] font-black uppercase tracking-widest hover:brightness-110 transition-all">
+                            <Phone size={11} /> Enviar
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
               )}
             </div>
           )}
-        </div>
-
-        <div className="p-8 border-t border-slate-50 flex justify-end gap-3 bg-white">
-          <button 
-            onClick={onClose}
-            className="px-8 py-3 bg-slate-100 text-slate-500 rounded-2xl font-bold hover:bg-slate-200 transition-all font-black uppercase tracking-widest text-[10px]"
-          >
-            Cerrar
-          </button>
-          <button 
-            onClick={() => {
-              onSave(history);
-              onClose();
-            }}
-            className="px-10 py-3 bg-primary text-dark rounded-2xl font-bold shadow-lg shadow-primary/20 hover:brightness-110 active:scale-95 transition-all font-black uppercase tracking-widest text-[10px]"
-          >
-            Guardar Cambios
-          </button>
         </div>
       </motion.div>
     </motion.div>

@@ -15,6 +15,7 @@ export interface Student {
   name: string;
   studentNumber?: string;
   phone?: string;
+  currentCertificate?: string;
   courseHistory: CourseHistoryType | string;
   mentorId: string;
   status: string;
